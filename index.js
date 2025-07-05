@@ -4,8 +4,10 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
 
 const app = express();
+const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
@@ -22,11 +24,16 @@ const pool = new Pool({
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-here';
 
+// JKT48 API Configuration
+const JKT48_API_BASE = 'https://v2.jkt48connect.my.id/api/admin/create-key';
+const JKT48_ADMIN_USERNAME = process.env.JKT48_ADMIN_USERNAME || 'vzy';
+const JKT48_ADMIN_PASSWORD = process.env.JKT48_ADMIN_PASSWORD || 'vzy';
+
 // Initialize database tables
 async function initDatabase() {
   try {
     const createUsersTable = `
-      CREATE TABLE IF NOT EXISTS jkt48dash (
+      CREATE TABLE IF NOT EXISTS dashjkt48 (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         email VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
@@ -37,7 +44,7 @@ async function initDatabase() {
         status VARCHAR(20) DEFAULT 'active',
         type VARCHAR(20) DEFAULT 'free',
         oshi VARCHAR(255) DEFAULT 'JKT48',
-        barcode TEXT,
+        barcode VARCHAR(255),
         balance DECIMAL(10,2) DEFAULT 0.00,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -50,6 +57,9 @@ async function initDatabase() {
     console.error('Database initialization error:', error);
   }
 }
+
+// Initialize database on startup
+initDatabase();
 
 // Helper function to generate member number
 function generateMemberNumber() {
@@ -64,27 +74,51 @@ function generateApiKey() {
   return `JC-${random}`;
 }
 
-// Helper function to generate simple barcode (SVG-based)
-function generateBarcode(memberNumber) {
-  // Simple barcode representation as SVG
-  const barcodeData = memberNumber.split('').map(char => {
-    return char.charCodeAt(0).toString(2).padStart(8, '0');
-  }).join('');
-  
-  const bars = barcodeData.split('').map((bit, index) => {
-    const width = bit === '1' ? 3 : 1;
-    return `<rect x="${index * 2}" y="0" width="${width}" height="50" fill="${bit === '1' ? 'black' : 'white'}"/>`;
-  }).join('');
-  
-  const svg = `
-    <svg width="200" height="70" xmlns="http://www.w3.org/2000/svg">
-      <rect width="200" height="70" fill="white"/>
-      ${bars}
-      <text x="100" y="65" text-anchor="middle" font-family="Arial" font-size="12">${memberNumber}</text>
-    </svg>
-  `;
-  
-  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+// Helper function to generate barcode string
+function generateBarcodeString() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 12; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+// Helper function to create JKT48 API key
+async function createJKT48ApiKey(username, email, type, apiKey) {
+  try {
+    const response = await axios.get(JKT48_API_BASE, {
+      params: {
+        username: JKT48_ADMIN_USERNAME,
+        password: JKT48_ADMIN_PASSWORD,
+        owner: username,
+        email: email,
+        type: type,
+        apikey: apiKey
+      },
+      timeout: 10000 // 10 seconds timeout
+    });
+
+    if (response.data && response.data.status === true) {
+      console.log('JKT48 API key created successfully:', response.data);
+      return {
+        success: true,
+        data: response.data
+      };
+    } else {
+      console.error('JKT48 API key creation failed:', response.data);
+      return {
+        success: false,
+        error: response.data?.message || 'Unknown error'
+      };
+    }
+  } catch (error) {
+    console.error('Error creating JKT48 API key:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }
 
 // Register endpoint
@@ -102,7 +136,7 @@ app.post('/api/register', async (req, res) => {
 
     // Check if user already exists
     const existingUser = await pool.query(
-      'SELECT * FROM jkt48dash WHERE email = $1 OR username = $2',
+      'SELECT * FROM dashjkt48 WHERE email = $1 OR username = $2',
       [email, username]
     );
 
@@ -119,11 +153,19 @@ app.post('/api/register', async (req, res) => {
     // Generate user data
     const memberNumber = generateMemberNumber();
     const apiKey = generateApiKey();
-    const barcode = generateBarcode(memberNumber);
+    const barcodeString = generateBarcodeString();
+
+    // Create API key in JKT48 system first
+    const jktResult = await createJKT48ApiKey(username, email, 'free', apiKey);
+    
+    if (!jktResult.success) {
+      console.warn('JKT48 API key creation failed, but continuing with registration:', jktResult.error);
+      // Continue with registration even if JKT48 API fails
+    }
 
     // Insert user into database
     const insertQuery = `
-      INSERT INTO jkt48dash (email, password, username, phone, member_number, api_key, barcode)
+      INSERT INTO dashjkt48 (email, password, username, phone, member_number, api_key, barcode)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at
     `;
@@ -135,7 +177,7 @@ app.post('/api/register', async (req, res) => {
       phone,
       memberNumber,
       apiKey,
-      barcode
+      barcodeString
     ]);
 
     const newUser = result.rows[0];
@@ -163,9 +205,10 @@ app.post('/api/register', async (req, res) => {
           type: newUser.type,
           oshi: newUser.oshi,
           balance: newUser.balance,
-          barcode: barcode,
+          barcode: barcodeString,
           createdAt: newUser.created_at
-        }
+        },
+        jkt48ApiResult: jktResult.success ? jktResult.data : null
       }
     });
 
@@ -173,7 +216,8 @@ app.post('/api/register', async (req, res) => {
     console.error('Registration error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -192,7 +236,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     // Find user
-    const userQuery = 'SELECT * FROM jkt48dash WHERE email = $1';
+    const userQuery = 'SELECT * FROM dashjkt48 WHERE email = $1';
     const userResult = await pool.query(userQuery, [email]);
 
     if (userResult.rows.length === 0) {
@@ -246,7 +290,8 @@ app.post('/api/login', async (req, res) => {
     console.error('Login error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -278,7 +323,7 @@ function authenticateToken(req, res, next) {
 // Get user profile
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
-    const userQuery = 'SELECT * FROM jkt48dash WHERE id = $1';
+    const userQuery = 'SELECT * FROM dashjkt48 WHERE id = $1';
     const userResult = await pool.query(userQuery, [req.user.userId]);
 
     if (userResult.rows.length === 0) {
@@ -313,7 +358,8 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     console.error('Profile error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -321,7 +367,7 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
 // Get all users (admin endpoint)
 app.get('/api/users', async (req, res) => {
   try {
-    const usersQuery = 'SELECT id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at FROM jkt48dash ORDER BY created_at DESC';
+    const usersQuery = 'SELECT id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at FROM dashjkt48 ORDER BY created_at DESC';
     const result = await pool.query(usersQuery);
 
     res.json({
@@ -334,7 +380,8 @@ app.get('/api/users', async (req, res) => {
     console.error('Users fetch error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -344,7 +391,8 @@ app.get('/api/health', (req, res) => {
   res.json({
     success: true,
     message: 'API is running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
@@ -369,7 +417,8 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
     success: false,
-    message: 'Something went wrong!'
+    message: 'Something went wrong!',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
@@ -381,9 +430,11 @@ app.use('*', (req, res) => {
   });
 });
 
-// Initialize database when module is loaded
+// Export for Vercel
 if (process.env.NODE_ENV !== 'production') {
-  initDatabase();
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
 }
 
 module.exports = app;
