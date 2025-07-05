@@ -18,7 +18,7 @@
     "uuid": "^9.0.0",
     "jsbarcode": "^3.11.5",
     "canvas": "^2.11.2",
-    "@jkt48/core": "latest"
+    "@jkt48/core": "^1.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
