@@ -26,7 +26,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-here';
 async function initDatabase() {
   try {
     const createUsersTable = `
-      CREATE TABLE IF NOT EXISTS users (
+      CREATE TABLE IF NOT EXISTS jkt48dash (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         email VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
@@ -102,7 +102,7 @@ app.post('/api/register', async (req, res) => {
 
     // Check if user already exists
     const existingUser = await pool.query(
-      'SELECT * FROM users WHERE email = $1 OR username = $2',
+      'SELECT * FROM jkt48dash WHERE email = $1 OR username = $2',
       [email, username]
     );
 
@@ -123,7 +123,7 @@ app.post('/api/register', async (req, res) => {
 
     // Insert user into database
     const insertQuery = `
-      INSERT INTO users (email, password, username, phone, member_number, api_key, barcode)
+      INSERT INTO jkt48dash (email, password, username, phone, member_number, api_key, barcode)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at
     `;
@@ -192,7 +192,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     // Find user
-    const userQuery = 'SELECT * FROM users WHERE email = $1';
+    const userQuery = 'SELECT * FROM jkt48dash WHERE email = $1';
     const userResult = await pool.query(userQuery, [email]);
 
     if (userResult.rows.length === 0) {
@@ -278,7 +278,7 @@ function authenticateToken(req, res, next) {
 // Get user profile
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
-    const userQuery = 'SELECT * FROM users WHERE id = $1';
+    const userQuery = 'SELECT * FROM jkt48dash WHERE id = $1';
     const userResult = await pool.query(userQuery, [req.user.userId]);
 
     if (userResult.rows.length === 0) {
@@ -321,7 +321,7 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
 // Get all users (admin endpoint)
 app.get('/api/users', async (req, res) => {
   try {
-    const usersQuery = 'SELECT id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at FROM users ORDER BY created_at DESC';
+    const usersQuery = 'SELECT id, email, username, phone, member_number, api_key, status, type, oshi, balance, created_at FROM jkt48dash ORDER BY created_at DESC';
     const result = await pool.query(usersQuery);
 
     res.json({
