@@ -4,12 +4,8 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
-const JBarcode = require('jsbarcode');
-const { createCanvas } = require('canvas');
-const jkt48Api = require('@jkt48/core');
 
 const app = express();
-const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
@@ -17,7 +13,7 @@ app.use(express.json());
 
 // Database configuration
 const pool = new Pool({
-  connectionString: 'postgresql://valzyy:_aZGK-UPaPUEsHuYnayfEA@dashboard-8638.j77.aws-ap-southeast-1.cockroachlabs.cloud:26257/restapi?sslmode=verify-full',
+  connectionString: process.env.DATABASE_URL || 'postgresql://valzyy:_aZGK-UPaPUEsHuYnayfEA@dashboard-8638.j77.aws-ap-southeast-1.cockroachlabs.cloud:26257/restapi?sslmode=verify-full',
   ssl: {
     rejectUnauthorized: false
   }
@@ -55,9 +51,6 @@ async function initDatabase() {
   }
 }
 
-// Initialize database on startup
-initDatabase();
-
 // Helper function to generate member number
 function generateMemberNumber() {
   const timestamp = Date.now().toString().slice(-6);
@@ -71,16 +64,27 @@ function generateApiKey() {
   return `JC-${random}`;
 }
 
-// Helper function to generate barcode
+// Helper function to generate simple barcode (SVG-based)
 function generateBarcode(memberNumber) {
-  const canvas = createCanvas(200, 100);
-  JBarcode(canvas, memberNumber, {
-    format: "CODE128",
-    width: 2,
-    height: 100,
-    displayValue: true
-  });
-  return canvas.toDataURL();
+  // Simple barcode representation as SVG
+  const barcodeData = memberNumber.split('').map(char => {
+    return char.charCodeAt(0).toString(2).padStart(8, '0');
+  }).join('');
+  
+  const bars = barcodeData.split('').map((bit, index) => {
+    const width = bit === '1' ? 3 : 1;
+    return `<rect x="${index * 2}" y="0" width="${width}" height="50" fill="${bit === '1' ? 'black' : 'white'}"/>`;
+  }).join('');
+  
+  const svg = `
+    <svg width="200" height="70" xmlns="http://www.w3.org/2000/svg">
+      <rect width="200" height="70" fill="white"/>
+      ${bars}
+      <text x="100" y="65" text-anchor="middle" font-family="Arial" font-size="12">${memberNumber}</text>
+    </svg>
+  `;
+  
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
 
 // Register endpoint
@@ -135,14 +139,6 @@ app.post('/api/register', async (req, res) => {
     ]);
 
     const newUser = result.rows[0];
-
-    // Create API key in JKT48 core system
-    try {
-      await jkt48Api.admin.createKey(username, email, 'free', apiKey);
-      console.log(`API key created in JKT48 core system for user: ${username}`);
-    } catch (jktError) {
-      console.error('Error creating API key in JKT48 core:', jktError);
-    }
 
     // Generate JWT token
     const token = jwt.sign(
@@ -385,8 +381,9 @@ app.use('*', (req, res) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// Initialize database when module is loaded
+if (process.env.NODE_ENV !== 'production') {
+  initDatabase();
+}
 
 module.exports = app;
