@@ -51,7 +51,7 @@ async function initDatabase() {
       );
     `;
 
-    // Table untuk menyimpan token
+    // Table untuk menyimpan token - creator_id sekarang nullable
     const createTokensTable = `
       CREATE TABLE IF NOT EXISTS tokens (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,7 +69,7 @@ async function initDatabase() {
       );
     `;
 
-    // Table untuk tracking penggunaan token
+    // Table untuk tracking penggunaan token - user_id sekarang nullable
     const createTokenUsageTable = `
       CREATE TABLE IF NOT EXISTS token_usage (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -77,7 +77,8 @@ async function initDatabase() {
         user_id UUID REFERENCES dashjkt48(id),
         used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         purpose VARCHAR(255),
-        metadata JSONB
+        metadata JSONB,
+        user_info JSONB
       );
     `;
 
@@ -429,10 +430,10 @@ app.get('/api/users', async (req, res) => {
 
 // ================== TOKEN MANAGEMENT ENDPOINTS ==================
 
-// Create Token
+// Create Token - NO AUTHENTICATION REQUIRED
 app.post('/api/tokens/create', async (req, res) => {
   try {
-    const { name, description, usageLimit, expiresAt, whatsappNumber } = req.body;
+    const { name, description, usageLimit, expiresAt, whatsappNumber, creatorInfo } = req.body;
 
     // Validate input
     if (!name) {
@@ -468,7 +469,7 @@ app.post('/api/tokens/create', async (req, res) => {
       usageLimit || 1,
       expiresAtDate,
       whatsappNumber || null,
-      req.user.userId
+      null // creator_id is now null since no authentication required
     ]);
 
     const newToken = result.rows[0];
@@ -500,7 +501,7 @@ app.post('/api/tokens/create', async (req, res) => {
   }
 });
 
-// Get all tokens (for admin/creator)
+// Get all tokens - NO AUTHENTICATION REQUIRED
 app.get('/api/tokens', async (req, res) => {
   try {
     const tokensQuery = `
@@ -543,7 +544,7 @@ app.get('/api/tokens', async (req, res) => {
   }
 });
 
-// Validate Token
+// Validate Token - NO AUTHENTICATION REQUIRED
 app.post('/api/tokens/validate', async (req, res) => {
   try {
     const { tokenCode, whatsappNumber } = req.body;
@@ -626,10 +627,10 @@ app.post('/api/tokens/validate', async (req, res) => {
   }
 });
 
-// Use Token
+// Use Token - NO AUTHENTICATION REQUIRED
 app.post('/api/tokens/use', async (req, res) => {
   try {
-    const { tokenCode, purpose, whatsappNumber, metadata } = req.body;
+    const { tokenCode, purpose, whatsappNumber, metadata, userInfo } = req.body;
 
     if (!tokenCode) {
       return res.status(400).json({
@@ -671,16 +672,17 @@ app.post('/api/tokens/use', async (req, res) => {
 
       // Record usage
       const usageQuery = `
-        INSERT INTO token_usage (token_id, user_id, purpose, metadata)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO token_usage (token_id, user_id, purpose, metadata, user_info)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
       `;
 
       const usageResult = await pool.query(usageQuery, [
         token.id,
-        req.user.userId,
+        null, // user_id is null since no authentication required
         purpose || 'General use',
-        metadata ? JSON.stringify(metadata) : null
+        metadata ? JSON.stringify(metadata) : null,
+        userInfo ? JSON.stringify(userInfo) : null
       ]);
 
       // Update token usage count
@@ -726,8 +728,8 @@ app.post('/api/tokens/use', async (req, res) => {
   }
 });
 
-// Get token usage history
-app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
+// Get token usage history - NO AUTHENTICATION REQUIRED
+app.get('/api/tokens/:tokenCode/usage', async (req, res) => {
   try {
     const { tokenCode } = req.params;
 
@@ -735,7 +737,7 @@ app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
       SELECT tu.*, u.username, u.phone, t.name as token_name
       FROM token_usage tu
       JOIN tokens t ON tu.token_id = t.id
-      JOIN dashjkt48 u ON tu.user_id = u.id
+      LEFT JOIN dashjkt48 u ON tu.user_id = u.id
       WHERE t.token_code = $1
       ORDER BY tu.used_at DESC
     `;
@@ -749,6 +751,7 @@ app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
       phone: row.phone,
       purpose: row.purpose,
       metadata: row.metadata,
+      userInfo: row.user_info,
       usedAt: row.used_at
     }));
 
@@ -768,7 +771,7 @@ app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
   }
 });
 
-// Update token status (activate/deactivate)
+// Update token status (activate/deactivate) - NO AUTHENTICATION REQUIRED
 app.patch('/api/tokens/:tokenCode/status', async (req, res) => {
   try {
     const { tokenCode } = req.params;
@@ -820,7 +823,7 @@ app.patch('/api/tokens/:tokenCode/status', async (req, res) => {
   }
 });
 
-// Delete token
+// Delete token - NO AUTHENTICATION REQUIRED
 app.delete('/api/tokens/:tokenCode', async (req, res) => {
   try {
     const { tokenCode } = req.params;
@@ -881,16 +884,16 @@ app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'JKT48 API System with Token Management',
-    version: '1.1.0',
+    version: '1.2.0',
     endpoints: {
       // User endpoints
       register: 'POST /api/register',
       login: 'POST /api/login',
-      profile: 'GET /api/profile',
+      profile: 'GET /api/profile (requires auth)',
       users: 'GET /api/users',
       health: 'GET /api/health',
       
-      // Token endpoints
+      // Token endpoints (no authentication required)
       createToken: 'POST /api/tokens/create',
       getTokens: 'GET /api/tokens',
       validateToken: 'POST /api/tokens/validate',
