@@ -50,8 +50,40 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `;
-    
+
+    // Table untuk menyimpan token
+    const createTokensTable = `
+      CREATE TABLE IF NOT EXISTS tokens (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        token_code VARCHAR(50) UNIQUE NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        usage_limit INTEGER DEFAULT 1,
+        usage_count INTEGER DEFAULT 0,
+        expires_at TIMESTAMP,
+        whatsapp_number VARCHAR(20),
+        creator_id UUID REFERENCES dashjkt48(id),
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
+    // Table untuk tracking penggunaan token
+    const createTokenUsageTable = `
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        token_id UUID REFERENCES tokens(id),
+        user_id UUID REFERENCES dashjkt48(id),
+        used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        purpose VARCHAR(255),
+        metadata JSONB
+      );
+    `;
+
     await pool.query(createUsersTable);
+    await pool.query(createTokensTable);
+    await pool.query(createTokenUsageTable);
     console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Database initialization error:', error);
@@ -84,6 +116,16 @@ function generateBarcodeString() {
   return result;
 }
 
+// Helper function to generate token code
+function generateTokenCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = 'VC-';
+  for (let i = 0; i < 8; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 // Helper function to create JKT48 API key
 async function createJKT48ApiKey(username, email, type, apiKey) {
   try {
@@ -96,7 +138,7 @@ async function createJKT48ApiKey(username, email, type, apiKey) {
         type: type,
         apikey: apiKey
       },
-      timeout: 10000 // 10 seconds timeout
+      timeout: 10000
     });
 
     if (response.data && response.data.status === true) {
@@ -160,7 +202,6 @@ app.post('/api/register', async (req, res) => {
     
     if (!jktResult.success) {
       console.warn('JKT48 API key creation failed, but continuing with registration:', jktResult.error);
-      // Continue with registration even if JKT48 API fails
     }
 
     // Insert user into database
@@ -386,6 +427,445 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+// ================== TOKEN MANAGEMENT ENDPOINTS ==================
+
+// Create Token
+app.post('/api/tokens/create', authenticateToken, async (req, res) => {
+  try {
+    const { name, description, usageLimit, expiresAt, whatsappNumber } = req.body;
+
+    // Validate input
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token name is required'
+      });
+    }
+
+    const tokenCode = generateTokenCode();
+    let expiresAtDate = null;
+
+    if (expiresAt) {
+      expiresAtDate = new Date(expiresAt);
+      if (isNaN(expiresAtDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid expiration date format'
+        });
+      }
+    }
+
+    const insertQuery = `
+      INSERT INTO tokens (token_code, name, description, usage_limit, expires_at, whatsapp_number, creator_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+    `;
+
+    const result = await pool.query(insertQuery, [
+      tokenCode,
+      name,
+      description || null,
+      usageLimit || 1,
+      expiresAtDate,
+      whatsappNumber || null,
+      req.user.userId
+    ]);
+
+    const newToken = result.rows[0];
+
+    res.status(201).json({
+      success: true,
+      message: 'Token created successfully',
+      data: {
+        id: newToken.id,
+        tokenCode: newToken.token_code,
+        name: newToken.name,
+        description: newToken.description,
+        usageLimit: newToken.usage_limit,
+        usageCount: newToken.usage_count,
+        expiresAt: newToken.expires_at,
+        whatsappNumber: newToken.whatsapp_number,
+        isActive: newToken.is_active,
+        createdAt: newToken.created_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Token creation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Get all tokens (for admin/creator)
+app.get('/api/tokens', authenticateToken, async (req, res) => {
+  try {
+    const tokensQuery = `
+      SELECT t.*, u.username as creator_username
+      FROM tokens t
+      LEFT JOIN dashjkt48 u ON t.creator_id = u.id
+      ORDER BY t.created_at DESC
+    `;
+
+    const result = await pool.query(tokensQuery);
+
+    const tokens = result.rows.map(token => ({
+      id: token.id,
+      tokenCode: token.token_code,
+      name: token.name,
+      description: token.description,
+      usageLimit: token.usage_limit,
+      usageCount: token.usage_count,
+      expiresAt: token.expires_at,
+      whatsappNumber: token.whatsapp_number,
+      creatorUsername: token.creator_username,
+      isActive: token.is_active,
+      createdAt: token.created_at,
+      updatedAt: token.updated_at
+    }));
+
+    res.json({
+      success: true,
+      data: tokens,
+      total: tokens.length
+    });
+
+  } catch (error) {
+    console.error('Tokens fetch error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Validate Token
+app.post('/api/tokens/validate', async (req, res) => {
+  try {
+    const { tokenCode, whatsappNumber } = req.body;
+
+    if (!tokenCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token code is required'
+      });
+    }
+
+    const tokenQuery = 'SELECT * FROM tokens WHERE token_code = $1';
+    const tokenResult = await pool.query(tokenQuery, [tokenCode]);
+
+    if (tokenResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Token not found'
+      });
+    }
+
+    const token = tokenResult.rows[0];
+
+    // Check if token is active
+    if (!token.is_active) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token is inactive'
+      });
+    }
+
+    // Check expiration
+    if (token.expires_at && new Date() > new Date(token.expires_at)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token has expired'
+      });
+    }
+
+    // Check usage limit
+    if (token.usage_count >= token.usage_limit) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token usage limit exceeded'
+      });
+    }
+
+    // Check WhatsApp number if specified
+    if (token.whatsapp_number && whatsappNumber && token.whatsapp_number !== whatsappNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'WhatsApp number does not match'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Token is valid',
+      data: {
+        id: token.id,
+        tokenCode: token.token_code,
+        name: token.name,
+        description: token.description,
+        usageLimit: token.usage_limit,
+        usageCount: token.usage_count,
+        remainingUses: token.usage_limit - token.usage_count,
+        expiresAt: token.expires_at,
+        whatsappNumber: token.whatsapp_number,
+        isActive: token.is_active
+      }
+    });
+
+  } catch (error) {
+    console.error('Token validation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Use Token
+app.post('/api/tokens/use', authenticateToken, async (req, res) => {
+  try {
+    const { tokenCode, purpose, whatsappNumber, metadata } = req.body;
+
+    if (!tokenCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token code is required'
+      });
+    }
+
+    // Start transaction
+    await pool.query('BEGIN');
+
+    try {
+      // Get token with lock
+      const tokenQuery = 'SELECT * FROM tokens WHERE token_code = $1 FOR UPDATE';
+      const tokenResult = await pool.query(tokenQuery, [tokenCode]);
+
+      if (tokenResult.rows.length === 0) {
+        throw new Error('Token not found');
+      }
+
+      const token = tokenResult.rows[0];
+
+      // Validate token
+      if (!token.is_active) {
+        throw new Error('Token is inactive');
+      }
+
+      if (token.expires_at && new Date() > new Date(token.expires_at)) {
+        throw new Error('Token has expired');
+      }
+
+      if (token.usage_count >= token.usage_limit) {
+        throw new Error('Token usage limit exceeded');
+      }
+
+      if (token.whatsapp_number && whatsappNumber && token.whatsapp_number !== whatsappNumber) {
+        throw new Error('WhatsApp number does not match');
+      }
+
+      // Record usage
+      const usageQuery = `
+        INSERT INTO token_usage (token_id, user_id, purpose, metadata)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+      `;
+
+      const usageResult = await pool.query(usageQuery, [
+        token.id,
+        req.user.userId,
+        purpose || 'General use',
+        metadata ? JSON.stringify(metadata) : null
+      ]);
+
+      // Update token usage count
+      const updateQuery = `
+        UPDATE tokens 
+        SET usage_count = usage_count + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING *
+      `;
+
+      const updateResult = await pool.query(updateQuery, [token.id]);
+      const updatedToken = updateResult.rows[0];
+
+      // Commit transaction
+      await pool.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Token used successfully',
+        data: {
+          tokenCode: updatedToken.token_code,
+          name: updatedToken.name,
+          usageCount: updatedToken.usage_count,
+          remainingUses: updatedToken.usage_limit - updatedToken.usage_count,
+          usageId: usageResult.rows[0].id,
+          usedAt: usageResult.rows[0].used_at,
+          purpose: purpose || 'General use'
+        }
+      });
+
+    } catch (error) {
+      await pool.query('ROLLBACK');
+      throw error;
+    }
+
+  } catch (error) {
+    console.error('Token usage error:', error);
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Get token usage history
+app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
+  try {
+    const { tokenCode } = req.params;
+
+    const usageQuery = `
+      SELECT tu.*, u.username, u.phone, t.name as token_name
+      FROM token_usage tu
+      JOIN tokens t ON tu.token_id = t.id
+      JOIN dashjkt48 u ON tu.user_id = u.id
+      WHERE t.token_code = $1
+      ORDER BY tu.used_at DESC
+    `;
+
+    const result = await pool.query(usageQuery, [tokenCode]);
+
+    const usage = result.rows.map(row => ({
+      id: row.id,
+      tokenName: row.token_name,
+      username: row.username,
+      phone: row.phone,
+      purpose: row.purpose,
+      metadata: row.metadata,
+      usedAt: row.used_at
+    }));
+
+    res.json({
+      success: true,
+      data: usage,
+      total: usage.length
+    });
+
+  } catch (error) {
+    console.error('Token usage history error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Update token status (activate/deactivate)
+app.patch('/api/tokens/:tokenCode/status', authenticateToken, async (req, res) => {
+  try {
+    const { tokenCode } = req.params;
+    const { isActive } = req.body;
+
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'isActive must be a boolean value'
+      });
+    }
+
+    const updateQuery = `
+      UPDATE tokens 
+      SET is_active = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE token_code = $2
+      RETURNING *
+    `;
+
+    const result = await pool.query(updateQuery, [isActive, tokenCode]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Token not found'
+      });
+    }
+
+    const token = result.rows[0];
+
+    res.json({
+      success: true,
+      message: `Token ${isActive ? 'activated' : 'deactivated'} successfully`,
+      data: {
+        tokenCode: token.token_code,
+        name: token.name,
+        isActive: token.is_active,
+        updatedAt: token.updated_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Token status update error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Delete token
+app.delete('/api/tokens/:tokenCode', authenticateToken, async (req, res) => {
+  try {
+    const { tokenCode } = req.params;
+
+    // Start transaction
+    await pool.query('BEGIN');
+
+    try {
+      // Delete usage records first
+      await pool.query('DELETE FROM token_usage WHERE token_id = (SELECT id FROM tokens WHERE token_code = $1)', [tokenCode]);
+
+      // Delete token
+      const deleteQuery = 'DELETE FROM tokens WHERE token_code = $1 RETURNING *';
+      const result = await pool.query(deleteQuery, [tokenCode]);
+
+      if (result.rows.length === 0) {
+        throw new Error('Token not found');
+      }
+
+      await pool.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Token deleted successfully',
+        data: {
+          tokenCode: result.rows[0].token_code,
+          name: result.rows[0].name
+        }
+      });
+
+    } catch (error) {
+      await pool.query('ROLLBACK');
+      throw error;
+    }
+
+  } catch (error) {
+    console.error('Token deletion error:', error);
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
@@ -400,14 +880,24 @@ app.get('/api/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'JKT48 API System',
-    version: '1.0.0',
+    message: 'JKT48 API System with Token Management',
+    version: '1.1.0',
     endpoints: {
+      // User endpoints
       register: 'POST /api/register',
       login: 'POST /api/login',
       profile: 'GET /api/profile',
       users: 'GET /api/users',
-      health: 'GET /api/health'
+      health: 'GET /api/health',
+      
+      // Token endpoints
+      createToken: 'POST /api/tokens/create',
+      getTokens: 'GET /api/tokens',
+      validateToken: 'POST /api/tokens/validate',
+      useToken: 'POST /api/tokens/use',
+      getTokenUsage: 'GET /api/tokens/:tokenCode/usage',
+      updateTokenStatus: 'PATCH /api/tokens/:tokenCode/status',
+      deleteToken: 'DELETE /api/tokens/:tokenCode'
     }
   });
 });
