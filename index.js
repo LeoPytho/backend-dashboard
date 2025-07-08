@@ -430,7 +430,7 @@ app.get('/api/users', async (req, res) => {
 // ================== TOKEN MANAGEMENT ENDPOINTS ==================
 
 // Create Token
-app.post('/api/tokens/create', authenticateToken, async (req, res) => {
+app.post('/api/tokens/create', async (req, res) => {
   try {
     const { name, description, usageLimit, expiresAt, whatsappNumber } = req.body;
 
@@ -501,7 +501,7 @@ app.post('/api/tokens/create', authenticateToken, async (req, res) => {
 });
 
 // Get all tokens (for admin/creator)
-app.get('/api/tokens', authenticateToken, async (req, res) => {
+app.get('/api/tokens', async (req, res) => {
   try {
     const tokensQuery = `
       SELECT t.*, u.username as creator_username
@@ -627,7 +627,7 @@ app.post('/api/tokens/validate', async (req, res) => {
 });
 
 // Use Token
-app.post('/api/tokens/use', authenticateToken, async (req, res) => {
+app.post('/api/tokens/use', async (req, res) => {
   try {
     const { tokenCode, purpose, whatsappNumber, metadata } = req.body;
 
@@ -769,7 +769,7 @@ app.get('/api/tokens/:tokenCode/usage', authenticateToken, async (req, res) => {
 });
 
 // Update token status (activate/deactivate)
-app.patch('/api/tokens/:tokenCode/status', authenticateToken, async (req, res) => {
+app.patch('/api/tokens/:tokenCode/status', async (req, res) => {
   try {
     const { tokenCode } = req.params;
     const { isActive } = req.body;
@@ -821,7 +821,7 @@ app.patch('/api/tokens/:tokenCode/status', authenticateToken, async (req, res) =
 });
 
 // Delete token
-app.delete('/api/tokens/:tokenCode', authenticateToken, async (req, res) => {
+app.delete('/api/tokens/:tokenCode', async (req, res) => {
   try {
     const { tokenCode } = req.params;
 
